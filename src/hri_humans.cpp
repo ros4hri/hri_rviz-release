@@ -43,6 +43,8 @@
 #include <OGRE/OgreViewport.h>
 #include <cv_bridge/cv_bridge.h>
 #include <hri_msgs/IdsList.h>
+#include <hri_msgs/NormalizedPointOfInterest2D.h>
+#include <hri_msgs/Skeleton2D.h>
 #include <image_transport/image_transport.h>
 #include <rviz/display_context.h>
 #include <rviz/frame_manager.h>
@@ -59,6 +61,10 @@
 #include <unordered_map>
 #include <vector>
 
+#define SKELETON_POINTS 18
+
+#define JOINT_RADIUS 8
+
 using namespace std;
 
 cv::Scalar get_color_from_id(std::string id) {
@@ -69,6 +75,10 @@ cv::Scalar get_color_from_id(std::string id) {
   cv::Mat3f bgr;
   cv::cvtColor(hsv, bgr, cv::COLOR_HSV2BGR);
   return cv::Scalar(bgr(0, 0) * 255);
+}
+
+int clip(int n, int lower, int upper){
+  return std::max(lower, std::min(n, upper));
 }
 
 namespace rviz {
@@ -104,9 +114,14 @@ HumansDisplay::HumansDisplay() : ImageDisplayBase(), texture_() {
       "Show body RoIs", true, "If set to true, show bodies bounding boxes.",
       this, SLOT(updateShowBodies()));
 
+  show_skeletons_property_ = new BoolProperty(
+      "Show 2D Skeletons", true, "If set to true, show 2D skeletons.",
+      this, SLOT(updateShowSkeletons()));
+
   show_faces_ = true;
   show_facial_landmarks_ = true;
   show_bodies_ = true;
+  show_skeletons_ = true;
   got_float_image_ = false;
 }
 
@@ -202,6 +217,10 @@ void HumansDisplay::updateShowBodies() {
   show_bodies_ = show_bodies_property_->getBool();
 }
 
+void HumansDisplay::updateShowSkeletons() {
+  show_skeletons_ = show_skeletons_property_->getBool();
+}
+
 void HumansDisplay::updateNormalizeOptions() {
   if (got_float_image_) {
     bool normalize = normalize_property_->getBool();
@@ -262,6 +281,110 @@ void HumansDisplay::reset() {
       Ogre::Vector3(999999, 999999, 999999));
 }
 
+void HumansDisplay::drawSkeleton(std::string id, int width, int height, std::vector<hri_msgs::NormalizedPointOfInterest2D>& skeleton){
+  /* Body chains:
+     1 - 2 - 8 - 11 - 5 ==> Upper body chain
+     2 - 3 - 4 ==> Right arm chain
+     5 - 6 - 7 ==> Left arm chain
+     8 - 9 - 10 ==> Right leg chain
+     11 - 12 - 13 ==> Left leg chain
+  */
+
+  if (skeleton.size() == SKELETON_POINTS) {
+
+    cv::Scalar skeletonColor = get_color_from_id(id);
+
+    int neckX = clip((int)(skeleton[hri_msgs::Skeleton2D::NECK].x*width), 0, width);
+    int neckY = clip((int)(skeleton[hri_msgs::Skeleton2D::NECK].y*height), 0, height);
+
+    cv::circle(cvBridge_->image, cv::Point(neckX, neckY), JOINT_RADIUS, skeletonColor, cv::FILLED);
+
+    int rightShoulderX = clip((int)(skeleton[hri_msgs::Skeleton2D::RIGHT_SHOULDER].x*width), 0, width);
+    int rightShoulderY = clip((int)(skeleton[hri_msgs::Skeleton2D::RIGHT_SHOULDER].y*height), 0, height);
+
+    cv::circle(cvBridge_->image, cv::Point(rightShoulderX, rightShoulderY), JOINT_RADIUS, skeletonColor, cv::FILLED);
+
+    int rightHipX = clip((int)(skeleton[hri_msgs::Skeleton2D::RIGHT_HIP].x*width), 0, width);
+    int rightHipY = clip((int)(skeleton[hri_msgs::Skeleton2D::RIGHT_HIP].y*height), 0, height);
+
+    cv::circle(cvBridge_->image, cv::Point(rightHipX, rightHipY), JOINT_RADIUS, skeletonColor, cv::FILLED);    
+
+    int leftHipX = clip((int)(skeleton[hri_msgs::Skeleton2D::LEFT_HIP].x*width), 0, width);
+    int leftHipY = clip((int)(skeleton[hri_msgs::Skeleton2D::LEFT_HIP].y*height), 0, height);
+
+    cv::circle(cvBridge_->image, cv::Point(leftHipX, leftHipY), JOINT_RADIUS, skeletonColor, cv::FILLED);
+
+    int leftShoulderX = clip((int)(skeleton[hri_msgs::Skeleton2D::LEFT_SHOULDER].x*width), 0, width);
+    int leftShoulderY = clip((int)(skeleton[hri_msgs::Skeleton2D::LEFT_SHOULDER].y*height), 0, height);
+
+    cv::circle(cvBridge_->image, cv::Point(leftShoulderX, leftShoulderY), JOINT_RADIUS, skeletonColor, cv::FILLED);
+
+    int rightElbowX = clip((int)(skeleton[hri_msgs::Skeleton2D::RIGHT_ELBOW].x*width), 0, width);
+    int rightElbowY = clip((int)(skeleton[hri_msgs::Skeleton2D::RIGHT_ELBOW].y*height), 0, height);
+
+    cv::circle(cvBridge_->image, cv::Point(rightElbowX, rightElbowY), JOINT_RADIUS, skeletonColor, cv::FILLED);
+
+    int rightWristX = clip((int)(skeleton[hri_msgs::Skeleton2D::RIGHT_WRIST].x*width), 0, width);
+    int rightWristY = clip((int)(skeleton[hri_msgs::Skeleton2D::RIGHT_WRIST].y*height), 0, height);
+
+    cv::circle(cvBridge_->image, cv::Point(rightWristX, rightWristY), JOINT_RADIUS, skeletonColor, cv::FILLED);
+
+    int leftElbowX = clip((int)(skeleton[hri_msgs::Skeleton2D::LEFT_ELBOW].x*width), 0, width);
+    int leftElbowY = clip((int)(skeleton[hri_msgs::Skeleton2D::LEFT_ELBOW].y*height), 0, height);
+
+    cv::circle(cvBridge_->image, cv::Point(leftElbowX, leftElbowY), JOINT_RADIUS, skeletonColor, cv::FILLED);
+
+    int leftWristX = clip((int)(skeleton[hri_msgs::Skeleton2D::LEFT_WRIST].x*width), 0, width);
+    int leftWristY = clip((int)(skeleton[hri_msgs::Skeleton2D::LEFT_WRIST].y*height), 0, height);
+
+    cv::circle(cvBridge_->image, cv::Point(leftWristX, leftWristY), JOINT_RADIUS, skeletonColor, cv::FILLED);
+
+    int rightKneeX = clip((int)(skeleton[hri_msgs::Skeleton2D::RIGHT_KNEE].x*width), 0, width);
+    int rightKneeY = clip((int)(skeleton[hri_msgs::Skeleton2D::RIGHT_KNEE].y*height), 0, height);
+
+    cv::circle(cvBridge_->image, cv::Point(rightKneeX, rightKneeY), JOINT_RADIUS, skeletonColor, cv::FILLED);
+
+    int rightAnkleX = clip((int)(skeleton[hri_msgs::Skeleton2D::RIGHT_ANKLE].x*width), 0, width);
+    int rightAnkleY = clip((int)(skeleton[hri_msgs::Skeleton2D::RIGHT_ANKLE].y*height), 0, height);
+
+    cv::circle(cvBridge_->image, cv::Point(rightAnkleX, rightAnkleY), JOINT_RADIUS, skeletonColor, cv::FILLED);
+
+    int leftKneeX = clip((int)(skeleton[hri_msgs::Skeleton2D::LEFT_KNEE].x*width), 0, width);
+    int leftKneeY = clip((int)(skeleton[hri_msgs::Skeleton2D::LEFT_KNEE].y*height), 0, height);
+
+    cv::circle(cvBridge_->image, cv::Point(leftKneeX, leftKneeY), JOINT_RADIUS, skeletonColor, cv::FILLED);
+
+    int leftAnkleX = clip((int)(skeleton[hri_msgs::Skeleton2D::LEFT_ANKLE].x*width), 0, width);
+    int leftAnkleY = clip((int)(skeleton[hri_msgs::Skeleton2D::LEFT_ANKLE].y*height), 0, height);
+
+    cv::circle(cvBridge_->image, cv::Point(leftAnkleX, leftAnkleY), JOINT_RADIUS, skeletonColor, cv::FILLED);
+
+    // Upper body
+    cv::line(cvBridge_->image, cv::Point(neckX, neckY), cv::Point(rightShoulderX, rightShoulderY), skeletonColor, 5, cv::FILLED);
+    cv::line(cvBridge_->image, cv::Point(rightHipX, rightHipY), cv::Point(rightShoulderX, rightShoulderY), skeletonColor, 5, cv::FILLED);
+    cv::line(cvBridge_->image, cv::Point(neckX, neckY), cv::Point(leftShoulderX, leftShoulderY), skeletonColor, 5, cv::FILLED);
+    cv::line(cvBridge_->image, cv::Point(leftHipX, leftHipY), cv::Point(leftShoulderX, leftShoulderY), skeletonColor, 5, cv::FILLED);
+    cv::line(cvBridge_->image, cv::Point(leftHipX, leftHipY), cv::Point(rightHipX, rightHipY), skeletonColor, 5, cv::FILLED);
+
+    // Right arm
+    cv::line(cvBridge_->image, cv::Point(rightShoulderX, rightShoulderY), cv::Point(rightElbowX, rightElbowY), skeletonColor, 5, cv::FILLED);
+    cv::line(cvBridge_->image, cv::Point(rightElbowX, rightElbowY), cv::Point(rightWristX, rightWristY), skeletonColor, 5, cv::FILLED);
+
+    // Left arm
+    cv::line(cvBridge_->image, cv::Point(leftShoulderX, leftShoulderY), cv::Point(leftElbowX, leftElbowY), skeletonColor, 5, cv::FILLED);
+    cv::line(cvBridge_->image, cv::Point(leftElbowX, leftElbowY), cv::Point(leftWristX, leftWristY), skeletonColor, 5, cv::FILLED);
+    
+    // Right Leg
+    cv::line(cvBridge_->image, cv::Point(rightHipX, rightHipY), cv::Point(rightKneeX, rightKneeY), skeletonColor, 5, cv::FILLED);
+    cv::line(cvBridge_->image, cv::Point(rightKneeX, rightKneeY), cv::Point(rightAnkleX, rightAnkleY), skeletonColor, 5, cv::FILLED);
+
+    // Left leg
+    cv::line(cvBridge_->image, cv::Point(leftHipX, leftHipY), cv::Point(leftKneeX, leftKneeY), skeletonColor, 5, cv::FILLED);
+    cv::line(cvBridge_->image, cv::Point(leftKneeX, leftKneeY), cv::Point(leftAnkleX, leftAnkleY), skeletonColor, 5, cv::FILLED);
+
+  }
+}
+
 void HumansDisplay::processMessage(const sensor_msgs::Image::ConstPtr& msg) {
   bool got_float_image =
       msg->encoding == sensor_msgs::image_encodings::TYPE_32FC1 ||
@@ -274,7 +397,7 @@ void HumansDisplay::processMessage(const sensor_msgs::Image::ConstPtr& msg) {
     updateNormalizeOptions();
   }
 
-  if (!show_faces_ && !show_bodies_) {
+  if (!show_faces_ && !show_bodies_ && !show_skeletons_) {
     texture_.addMessage(msg);
     return;
   }
@@ -301,13 +424,19 @@ void HumansDisplay::processMessage(const sensor_msgs::Image::ConstPtr& msg) {
     }
   }
 
-  if (show_bodies_) {
+  if (show_bodies_ || show_skeletons_) {
     auto bodies = hri_listener.getBodies();
     for (auto const& body : bodies) {
       if (auto body_ptr =
               body.second.lock()) {  // ensure the body is still here
-        auto roi = body_ptr->roi();
-        cv::rectangle(cvBridge_->image, roi, get_color_from_id(body.first), 5);
+        if (show_bodies_){
+          auto roi = body_ptr->roi();
+          cv::rectangle(cvBridge_->image, roi, get_color_from_id(body.first), 5);
+        }
+        if (show_skeletons_){
+          auto skeleton = body_ptr->skeleton();
+          drawSkeleton(body.first, msg->width, msg->height, skeleton);
+        }
       }
     }
   }
