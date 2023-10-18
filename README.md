@@ -1,3 +1,26 @@
+## hri_rviz (noetic) - 0.4.2-1
+
+The packages in the `hri_rviz` repository were released into the `noetic` distro by running `/usr/bin/bloom-release hri_rviz -r noetic` on `Wed, 18 Oct 2023 08:57:22 -0000`
+
+The `hri_rviz` package was released.
+
+Version of package(s) in repository `hri_rviz`:
+
+- upstream repository: https://github.com/ros4hri/hri_rviz.git
+- release repository: https://github.com/ros4hri/hri_rviz-release.git
+- rosdistro version: `0.4.1-1`
+- old version: `0.4.1-1`
+- new version: `0.4.2-1`
+
+Versions of tools used:
+
+- bloom version: `0.11.2`
+- catkin_pkg version: `1.0.0`
+- rosdep version: `0.22.2`
+- rosdistro version: `0.9.0`
+- vcstools version: `0.1.42`
+
+
 ## hri_rviz (noetic) - 0.4.1-1
 
 The packages in the `hri_rviz` repository were released into the `noetic` distro by running `/usr/bin/bloom-release hri_rviz -r noetic` on `Wed, 05 Jul 2023 12:31:12 -0000`
