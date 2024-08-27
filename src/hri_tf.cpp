@@ -1,5 +1,7 @@
 /*
  * Copyright (c) 2012, Willow Garage, Inc.
+ * Copyright (c) 2018, Bosch Software Innovations, GmbH.
+ * Copyright (c) 2024, PAL Robotics, S.L.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -26,234 +28,176 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
+
+#include "hri_rviz/hri_tf.hpp"
+
+#include <algorithm>
+#include <cassert>
+#include <memory>
+#include <set>
+#include <string>
+#include <vector>
+#include <utility>
+
+#include <OgreSceneNode.h>
+#include <OgreSceneManager.h>
+
+#include "tf2_ros/transform_listener.h"
+#include "tf2_ros/buffer.h"
+
+#include "rviz_rendering/objects/arrow.hpp"
+#include "rviz_rendering/objects/axes.hpp"
+#include "rviz_rendering/objects/movable_text.hpp"
+#include "rviz_common/display_context.hpp"
+#include "rviz_common/frame_manager_iface.hpp"
+#include "rviz_common/logging.hpp"
+#include "rviz_common/msg_conversions.hpp"
+#include "rviz_common/properties/bool_property.hpp"
+#include "rviz_common/properties/float_property.hpp"
+#include "rviz_common/properties/quaternion_property.hpp"
+#include "rviz_common/properties/string_property.hpp"
+#include "rviz_common/properties/vector_property.hpp"
+#include "rviz_common/interaction/forwards.hpp"
+#include "rviz_common/interaction/selection_manager.hpp"
+#include "rviz_common/uniform_string_stream.hpp"
+#include "hri_rviz/frame_info.hpp"
+#include "hri_rviz/frame_selection_handler.hpp"
+#include "rviz_default_plugins/transformation/tf_wrapper.hpp"
+
 #include <algorithm>
 
-#include <boost/bind/bind.hpp>
+using rviz_common::interaction::SelectionHandler;
+using rviz_common::properties::BoolProperty;
+using rviz_common::properties::FloatProperty;
+using rviz_common::properties::StatusProperty;
+using rviz_common::properties::StringProperty;
+using rviz_common::properties::Property;
+using rviz_common::properties::QuaternionProperty;
+using rviz_common::properties::VectorProperty;
+using rviz_common::interaction::Picked;
+using rviz_rendering::Axes;
+using rviz_rendering::Arrow;
+using rviz_rendering::MovableText;
 
-#include <OGRE/OgreSceneNode.h>
-#include <OGRE/OgreSceneManager.h>
-
-#include <rviz/display_context.h>
-#include <rviz/frame_manager.h>
-#include <rviz/ogre_helpers/arrow.h>
-#include <rviz/ogre_helpers/axes.h>
-#include <rviz/ogre_helpers/movable_text.h>
-#include <rviz/properties/bool_property.h>
-#include <rviz/properties/float_property.h>
-#include <rviz/properties/quaternion_property.h>
-#include <rviz/properties/string_property.h>
-#include <rviz/properties/vector_property.h>
-#include <rviz/selection/forwards.h>
-#include <rviz/selection/selection_manager.h>
-
-#include "hri_tf.h"
-
-namespace rviz
+namespace rviz_default_plugins
 {
-class FrameSelectionHandler : public SelectionHandler
+
+namespace displays
 {
-public:
-  FrameSelectionHandler(FrameInfo* frame, DisplayContext* context);
-  ~FrameSelectionHandler() override
-  {
-  }
 
-  void createProperties(const Picked& obj, Property* parent_property) override;
-  void destroyProperties(const Picked& obj, Property* parent_property) override;
-
-  bool getEnabled();
-  void setEnabled(bool enabled);
-  void setParentName(const std::string& parent_name);
-  void setPosition(const Ogre::Vector3& position);
-  void setOrientation(const Ogre::Quaternion& orientation);
-
-private:
-  FrameInfo* frame_;
-  Property* category_property_;
-  BoolProperty* enabled_property_;
-  StringProperty* parent_property_;
-  VectorProperty* position_property_;
-  QuaternionProperty* orientation_property_;
-};
-
-FrameSelectionHandler::FrameSelectionHandler(FrameInfo* frame, DisplayContext* context)
-  : SelectionHandler(context)
-  , frame_(frame)
-  , category_property_(nullptr)
-  , enabled_property_(nullptr)
-  , parent_property_(nullptr)
-  , position_property_(nullptr)
-  , orientation_property_(nullptr)
+TFHRIDisplay::TFHRIDisplay()
+: update_timer_(0.0f),
+  changing_single_frame_enabled_state_(false),
+  show_faces_(true),
+  show_gazes_(true),
+  show_bodies_(true),
+  transformer_guard_(
+    std::make_unique<rviz_default_plugins::transformation::TransformerGuard<
+      rviz_default_plugins::transformation::TFFrameTransformer>>(this, "TF"))
 {
-}
+  show_names_property_ = new BoolProperty(
+    "Show Names",
+    false,
+    "Whether or not names should be shown next to the frames.",
+    this,
+    SLOT(updateShowNames()));
 
-void FrameSelectionHandler::createProperties(const Picked& /*obj*/, Property* parent_property)
-{
-  category_property_ =
-      new Property("Frame " + QString::fromStdString(frame_->name_), QVariant(), "", parent_property);
+  show_axes_property_ = new BoolProperty(
+    "Show Axes",
+    true,
+    "Whether or not the axes of each frame should be shown.",
+    this,
+    SLOT(updateShowAxes()));
 
-  enabled_property_ = new BoolProperty("Enabled", true, "", category_property_,
-                                       SLOT(updateVisibilityFromSelection()), frame_);
+  show_arrows_property_ = new BoolProperty(
+    "Show Arrows",
+    true,
+    "Whether or not arrows from child to parent should be shown.",
+    this,
+    SLOT(updateShowArrows()));
 
-  parent_property_ = new StringProperty("Parent", "", "", category_property_);
-  parent_property_->setReadOnly(true);
+  scale_property_ = new FloatProperty(
+    "Marker Scale",
+    1,
+    "Scaling factor for all names, axes and arrows.",
+    this);
 
-  position_property_ = new VectorProperty("Position", Ogre::Vector3::ZERO, "", category_property_);
-  position_property_->setReadOnly(true);
-
-  orientation_property_ =
-      new QuaternionProperty("Orientation", Ogre::Quaternion::IDENTITY, "", category_property_);
-  orientation_property_->setReadOnly(true);
-}
-
-void FrameSelectionHandler::destroyProperties(const Picked& /*obj*/, Property* /*parent_property*/)
-{
-  delete category_property_; // This deletes its children as well.
-  category_property_ = nullptr;
-  enabled_property_ = nullptr;
-  parent_property_ = nullptr;
-  position_property_ = nullptr;
-  orientation_property_ = nullptr;
-}
-
-bool FrameSelectionHandler::getEnabled()
-{
-  if (enabled_property_)
-  {
-    return enabled_property_->getBool();
-  }
-  return false; // should never happen, but don't want to crash if it does.
-}
-
-void FrameSelectionHandler::setEnabled(bool enabled)
-{
-  if (enabled_property_)
-  {
-    enabled_property_->setBool(enabled);
-  }
-}
-
-void FrameSelectionHandler::setParentName(const std::string& parent_name)
-{
-  if (parent_property_)
-  {
-    parent_property_->setStdString(parent_name);
-  }
-}
-
-void FrameSelectionHandler::setPosition(const Ogre::Vector3& position)
-{
-  if (position_property_)
-  {
-    position_property_->setVector(position);
-  }
-}
-
-void FrameSelectionHandler::setOrientation(const Ogre::Quaternion& orientation)
-{
-  if (orientation_property_)
-  {
-    orientation_property_->setQuaternion(orientation);
-  }
-}
-
-typedef std::set<FrameInfo*> S_FrameInfo;
-
-HRITFDisplay::HRITFDisplay() : Display(), update_timer_(0.0f), changing_single_frame_enabled_state_(false),
-  showFaces_(true), showGazes_(true), showSkeletons_(true) 
-{
-  show_names_property_ =
-      new BoolProperty("Show Names", true, "Whether or not names should be shown next to the frames.",
-                       this, SLOT(updateShowNames()));
-
-  show_axes_property_ =
-      new BoolProperty("Show Axes", true, "Whether or not the axes of each frame should be shown.", this,
-                       SLOT(updateShowAxes()));
-
-  show_arrows_property_ = new BoolProperty("Show Arrows", true,
-                                           "Whether or not arrows from child to parent should be shown.",
-                                           this, SLOT(updateShowArrows()));
-
-  scale_property_ =
-      new FloatProperty("Marker Scale", 1, "Scaling factor for all names, axes and arrows.", this);
-
-  alpha_property_ = new FloatProperty("Marker Alpha", 1, "Alpha channel value for all axes.", this);
-  alpha_property_->setMin(0);
-  alpha_property_->setMax(1);
-
-  show_faces_property_ =
-      new BoolProperty("Show Faces", true, "Whether or not the face_ frames should be displayed.", this,
-                       SLOT(updateShowFaces()));
-  show_gazes_property_ =
-      new BoolProperty("Show Gazes", true, "Whether or not the gaze_ frames should be displayed.", this,
-                       SLOT(updateShowGazes()));
-
-  show_skeletons_property_ =
-      new BoolProperty("Show Skeletons", true, "'Whether or not human skeleton frames should be displayed.", this,
-                       SLOT(updateshowSkeletons()));
-
-  update_rate_property_ = new FloatProperty("Update Interval", 0,
-                                            "The interval, in seconds, at which to update the frame "
-                                            "transforms. 0 means to do so every update cycle.",
-                                            this);
+  update_rate_property_ = new FloatProperty(
+    "Update Interval",
+    0,
+    "The interval, in seconds, at which to update the frame transforms. "
+    "0 means to do so every update cycle.",
+    this);
   update_rate_property_->setMin(0);
 
   frame_timeout_property_ = new FloatProperty(
-      "Frame Timeout", 15,
-      "The length of time, in seconds, before a frame that has not been updated is considered \"dead\"."
-      "  For 1/3 of this time the frame will appear correct, for the second 1/3rd it will fade to gray,"
-      " and then it will fade out completely.",
-      this);
+    "Frame Timeout",
+    15,
+    "The length of time, in seconds, before a frame that has not been updated is considered"
+    " \"dead\".  For 1/3 of this time the frame will appear correct, for the second 1/3rd it will"
+    " fade to gray, and then it will fade out completely.",
+    this);
   frame_timeout_property_->setMin(1);
 
   frames_category_ = new Property("Frames", QVariant(), "The list of all frames.", this);
 
-  all_enabled_property_ =
-      new BoolProperty("All Enabled", true, "Whether all the frames should be enabled or not.",
-                       frames_category_, SLOT(allEnabledChanged()), this);
+  all_enabled_property_ = new BoolProperty(
+    "All Enabled",
+    true,
+    "Whether all the frames should be enabled or not.",
+    frames_category_,
+    SLOT(allEnabledChanged()),
+    this);
 
   tree_category_ = new Property(
-      "Tree", QVariant(), "A tree-view of the frames, showing the parent/child relationships.", this);
+    "Tree",
+    QVariant(),
+    "A tree-view of the frames, showing the parent/child relationships.",
+    this);
 
-  skeleton_components_.push_back("body");
-  skeleton_components_.push_back("head");
-  skeleton_components_.push_back("torso");
-  skeleton_components_.push_back("waist");
-  skeleton_components_.push_back("p_head");
-  skeleton_components_.push_back("y_head");
-  skeleton_components_.push_back("l_ankle");
-  skeleton_components_.push_back("l_elbow");
-  skeleton_components_.push_back("l_hip");
-  skeleton_components_.push_back("l_knee");
-  skeleton_components_.push_back("l_p_hip");
-  skeleton_components_.push_back("l_p_shoulder");
-  skeleton_components_.push_back("l_shoulder");
-  skeleton_components_.push_back("l_wrist");
-  skeleton_components_.push_back("l_y_hip");
-  skeleton_components_.push_back("l_y_shoulder");
-  skeleton_components_.push_back("r_ankle");
-  skeleton_components_.push_back("r_elbow");
-  skeleton_components_.push_back("r_hip");
-  skeleton_components_.push_back("r_knee");
-  skeleton_components_.push_back("r_p_hip");
-  skeleton_components_.push_back("r_p_shoulder");
-  skeleton_components_.push_back("r_shoulder");
-  skeleton_components_.push_back("r_wrist");
-  skeleton_components_.push_back("r_y_hip");
-  skeleton_components_.push_back("r_y_shoulder");
+  show_faces_property_ = new BoolProperty(
+    "Show Faces",
+    true,
+    "Whether the face frames should be enabled or not.",
+    this,
+    SLOT(showFacesChanged()),
+    this);
+
+  show_gazes_property_ = new BoolProperty(
+    "Show Gazes",
+    true,
+    "Whether the gaze frames should be enabled or not.",
+    this,
+    SLOT(showGazesChanged()),
+    this);
+
+  show_bodies_property_ = new BoolProperty(
+    "Show Bodies",
+    true,
+    "Whether the body frames should be enabled or not.",
+    this,
+    SLOT(showBodiesChanged()),
+    this);
+
+  hri_executor_ = rclcpp::executors::MultiThreadedExecutor::make_shared();
+  hri_node_ = rclcpp::Node::make_shared("hri_node_hri_tf");
+  async_client_node_ = rclcpp::Node::make_shared("async_client_node_tf_hri");
+  hri_executor_->add_node(hri_node_);
+  hri_executor_->add_node(async_client_node_);
+  hri_listener_ = hri::HRIListener::create(hri_node_);
+
+  apc_ = std::make_shared<rclcpp::AsyncParametersClient>(async_client_node_, "/fullbody_detect");
 }
 
-HRITFDisplay::~HRITFDisplay()
+TFHRIDisplay::~TFHRIDisplay()
 {
-  clear();
-  if (initialized())
-  {
+  if (initialized()) {
     root_node_->removeAndDestroyAllChildren();
     scene_manager_->destroySceneNode(root_node_);
   }
 }
 
-void HRITFDisplay::onInitialize()
+void TFHRIDisplay::onInitialize()
 {
   frame_config_enabled_state_.clear();
 
@@ -262,22 +206,22 @@ void HRITFDisplay::onInitialize()
   names_node_ = root_node_->createChildSceneNode();
   arrows_node_ = root_node_->createChildSceneNode();
   axes_node_ = root_node_->createChildSceneNode();
+
+  transformer_guard_->initialize(context_);
 }
 
-void HRITFDisplay::load(const Config& config)
+void TFHRIDisplay::load(const rviz_common::Config & config)
 {
-  Display::load(config);
+  rviz_common::Display::load(config);
 
   // Load the enabled state for all frames specified in the config, and store
   // the values in a map so that the enabled state can be properly set once
   // the frame is created
-  Config c = config.mapGetChild("Frames");
-  for (Config::MapIterator iter = c.mapIterator(); iter.isValid(); iter.advance())
-  {
+  rviz_common::Config c = config.mapGetChild("Frames");
+  for (auto iter = c.mapIterator(); iter.isValid(); iter.advance()) {
     QString key = iter.currentKey();
-    if (key != "All Enabled")
-    {
-      const Config& child = iter.currentChild();
+    if (key != "All Enabled") {
+      const rviz_common::Config & child = iter.currentChild();
       bool enabled = child.mapGetChild("Value").getValue().toBool();
 
       frame_config_enabled_state_[key.toStdString()] = enabled;
@@ -285,24 +229,29 @@ void HRITFDisplay::load(const Config& config)
   }
 }
 
-void HRITFDisplay::clear()
+void TFHRIDisplay::clear()
 {
-  // Clear the tree.
   tree_category_->removeChildren();
 
-  // Clear the frames category, except for the "All enabled" property, which is first.
   frames_category_->removeChildren(1);
 
-  // Clear all frames
-  while (!frames_.empty())
-    deleteFrame(frames_.begin(), false);
+  hri_tools::S_FrameInfo to_delete;
+  for (auto & frame : frames_) {
+    to_delete.insert(frame.second);
+  }
+
+  for (auto & frame : to_delete) {
+    deleteFrame(frame, false);
+  }
+
+  frames_.clear();
 
   update_timer_ = 0.0f;
 
   clearStatuses();
 }
 
-void HRITFDisplay::onEnable()
+void TFHRIDisplay::onEnable()
 {
   root_node_->setVisible(true);
 
@@ -311,285 +260,252 @@ void HRITFDisplay::onEnable()
   axes_node_->setVisible(show_axes_property_->getBool());
 }
 
-void HRITFDisplay::onDisable()
+void TFHRIDisplay::onDisable()
 {
   root_node_->setVisible(false);
   clear();
 }
 
-void HRITFDisplay::updateShowNames()
+void TFHRIDisplay::updateShowNames()
 {
   names_node_->setVisible(show_names_property_->getBool());
 
-  M_FrameInfo::iterator it = frames_.begin();
-  M_FrameInfo::iterator end = frames_.end();
-  for (; it != end; ++it)
-  {
-    FrameInfo* frame = it->second;
-
-    frame->updateVisibilityFromFrame();
+  for (auto & frame : frames_) {
+    frame.second->updateVisibilityFromFrame();
   }
 }
 
-void HRITFDisplay::updateShowAxes()
+void TFHRIDisplay::updateShowAxes()
 {
   axes_node_->setVisible(show_axes_property_->getBool());
 
-  M_FrameInfo::iterator it = frames_.begin();
-  M_FrameInfo::iterator end = frames_.end();
-  for (; it != end; ++it)
-  {
-    FrameInfo* frame = it->second;
-
-    frame->updateVisibilityFromFrame();
+  for (auto & frame : frames_) {
+    frame.second->updateVisibilityFromFrame();
   }
 }
 
-void HRITFDisplay::updateShowFaces(){
-  showFaces_ = show_faces_property_->getBool();
-}
-
-void HRITFDisplay::updateShowGazes(){
-  showGazes_ = show_gazes_property_->getBool();
-}
-
-void HRITFDisplay::updateshowSkeletons(){
-  showSkeletons_ = show_skeletons_property_->getBool();
-}
-
-void HRITFDisplay::updateShowArrows()
+void TFHRIDisplay::updateShowArrows()
 {
   arrows_node_->setVisible(show_arrows_property_->getBool());
 
-  M_FrameInfo::iterator it = frames_.begin();
-  M_FrameInfo::iterator end = frames_.end();
-  for (; it != end; ++it)
-  {
-    FrameInfo* frame = it->second;
-
-    frame->updateVisibilityFromFrame();
+  for (auto & frame : frames_) {
+    frame.second->updateVisibilityFromFrame();
   }
 }
 
-void HRITFDisplay::allEnabledChanged()
+void TFHRIDisplay::allEnabledChanged()
 {
-  if (changing_single_frame_enabled_state_)
-  {
+  if (changing_single_frame_enabled_state_) {
     return;
   }
   bool enabled = all_enabled_property_->getBool();
 
-  M_FrameInfo::iterator it = frames_.begin();
-  M_FrameInfo::iterator end = frames_.end();
-  for (; it != end; ++it)
-  {
-    FrameInfo* frame = it->second;
-
-    frame->enabled_property_->setBool(enabled);
+  for (auto & frame : frames_) {
+    frame.second->enabled_property_->setBool(enabled);
   }
 }
 
-void HRITFDisplay::update(float wall_dt, float /*ros_dt*/)
+void TFHRIDisplay::showFacesChanged()
 {
+  show_faces_ = show_faces_property_->getBool();
+}
+
+void TFHRIDisplay::showGazesChanged()
+{
+  show_gazes_ = show_gazes_property_->getBool();
+}
+
+void TFHRIDisplay::showBodiesChanged()
+{
+  show_bodies_ = show_bodies_property_->getBool();
+}
+
+void TFHRIDisplay::update(float wall_dt, float ros_dt)
+{
+  hri_executor_->spin_some();
+
+  if (!transformer_guard_->checkTransformer()) {
+    return;
+  }
+
+  (void) ros_dt;
   update_timer_ += wall_dt;
   float update_rate = update_rate_property_->getFloat();
-  if (update_rate < 0.0001f || update_timer_ > update_rate)
-  {
+  if (update_rate < 0.0001f || update_timer_ > update_rate * 1000000000) {
     updateFrames();
 
     update_timer_ = 0.0f;
   }
 }
 
-FrameInfo* HRITFDisplay::getFrameInfo(const std::string& frame)
+void TFHRIDisplay::updateFrames()
 {
-  M_FrameInfo::iterator it = frames_.find(frame);
-  if (it == frames_.end())
-  {
+  typedef std::vector<std::string> V_string;
+  V_string frames;
+  V_string accepted_frames;
+  frames = context_->getFrameManager()->getAllFrameNames();
+  auto faces = hri_listener_->getFaces();
+  auto bodies = hri_listener_->getBodies();
+  if (show_faces_ || show_gazes_ || show_bodies_) {
+    for (auto & frame: frames) {
+      if (show_faces_) {
+        if (startsWith(frame, std::string("face_"))) {
+          for (auto & face: faces) {
+            if (face.second->valid() && hasId(frame, face.first)) {
+              accepted_frames.push_back(frame);
+              break;
+            }
+          }
+          continue;
+        }
+      }
+      if (show_gazes_) {
+        if (startsWith(frame, std::string("gaze_"))) {
+          for (auto & face: faces) {
+            if (face.second->valid() && hasId(frame, face.first)) {
+              accepted_frames.push_back(frame);
+              break;
+            }
+          }
+          continue;
+        }
+      }
+      if (show_bodies_) {
+        for (auto & skeleton_component: skeleton_components) {
+          if (startsWith(frame, skeleton_component)) {
+            for (auto & body: bodies) {
+              if (body.second->valid() && hasId(frame, body.first)) {
+                accepted_frames.push_back(frame);
+                break;
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  std::sort(accepted_frames.begin(), accepted_frames.end());
+
+  hri_tools::S_FrameInfo current_frames = createOrUpdateFrames(accepted_frames);
+  deleteObsoleteFrames(current_frames);
+
+  context_->queueRender();
+}
+
+hri_tools::S_FrameInfo TFHRIDisplay::createOrUpdateFrames(const std::vector<std::string> & frames)
+{
+  hri_tools::S_FrameInfo current_frames;
+  for (auto & frame : frames) {
+    if (frame.empty()) {
+      continue;
+    }
+
+    hri_tools::FrameInfo * info = getFrameInfo(frame);
+    if (!info) {
+      info = createFrame(frame);
+    } else {
+      updateFrame(info);
+    }
+
+    current_frames.insert(info);
+  }
+  return current_frames;
+}
+
+hri_tools::FrameInfo * TFHRIDisplay::getFrameInfo(const std::string & frame)
+{
+  auto it = frames_.find(frame);
+  if (it == frames_.end()) {
     return nullptr;
   }
 
   return it->second;
 }
 
-void HRITFDisplay::updateFrames()
+void TFHRIDisplay::deleteObsoleteFrames(hri_tools::S_FrameInfo & current_frames)
 {
-  typedef std::vector<std::string> V_string;
-  V_string frames;
-  context_->getTF2BufferPtr()->_getFrameStrings(frames);
-  std::sort(frames.begin(), frames.end());
-
-  auto faces = hri_listener_.getFaces();
-  auto bodies = hri_listener_.getBodies();
-  std::string id;
-
-  bool faceFound;
-  bool gazeFound;
-  bool skeletonFound;  bool idFound;
-
-  auto framesIt = frames.begin();
-  while(framesIt != frames.end()){
-    faceFound = ((*framesIt).rfind("face_", 0) == 0);
-    
-    if(showFaces_ && faceFound){
-      id = (*framesIt).substr((*framesIt).size()-5);
-      idFound = (faces.find(id) != faces.end()); // Checking if the face is among those currently tracked
-      if (idFound && showFaces_){
-        ++framesIt;
-      } else {
-        framesIt = frames.erase(framesIt);
-      }
-      continue;
-    }
-
-    gazeFound = ((*framesIt).rfind("gaze_", 0) == 0);
-
-    if(showGazes_ && gazeFound){
-      id = (*framesIt).substr((*framesIt).size()-5);
-      idFound = (faces.find(id) != faces.end()); // Checking if the face is among those currently tracked
-      if (idFound && showGazes_){
-        ++framesIt;
-      } else {
-        framesIt = frames.erase(framesIt);
-      }
-      continue;
-    }
-
-    // At this point, if the frame name follows the ROS4HRI frame convention,
-    // it must be a skeleton frame.
-
-    // First of all, it is to be confirmed that the frame follows the ROS4HRI
-    // naming convention. To do this, it is possible to check if the 
-    // frame name belongs to one of the skeleton frames.
-
-    std::string frameName = *framesIt;
-
-    // Smaller possible body component name = body_<body_id>
-    // Considering that the body id is 5 chars, then the 
-    // minimum size for a body component name is 10 chars
-    if (frameName.length() < 10){
-      framesIt = frames.erase(framesIt);
-      continue;
-    }  
-
-    std::string possibleSkeletonComponent = frameName.substr(0, frameName.length()-6);
-    skeletonFound = (std::find(skeleton_components_.begin(), skeleton_components_.end(), possibleSkeletonComponent) != skeleton_components_.end());
-    if(showSkeletons_ && skeletonFound){
-      id = (*framesIt).substr((*framesIt).size()-5);
-      idFound = (bodies.find(id) != bodies.end()); // Checking if the body is among those currently tracked
-      if (idFound){
-        ++framesIt;
-      } else {
-        framesIt = frames.erase(framesIt);
-      }
-      continue;
-    } else {
-      framesIt = frames.erase(framesIt);
-      continue;
+  hri_tools::S_FrameInfo to_delete;
+  for (auto & frame : frames_) {
+    if (current_frames.find(frame.second) == current_frames.end()) {
+      to_delete.insert(frame.second);
     }
   }
 
-  S_FrameInfo current_frames;
-
-  {
-    for (const std::string& frame : frames)
-    {
-      if (frame.empty())
-      {
-        continue;
-      }
-
-      FrameInfo* info = getFrameInfo(frame);
-      if (!info)
-      {
-        info = createFrame(frame);
-      }
-      else
-      {
-        updateFrame(info);
-      }
-
-      current_frames.insert(info);
-    }
+  for (auto & frame : to_delete) {
+    deleteFrame(frame, true);
   }
-
-  {
-    M_FrameInfo::iterator frame_it = frames_.begin();
-    M_FrameInfo::iterator frame_end = frames_.end();
-    while (frame_it != frame_end)
-    {
-      if (current_frames.find(frame_it->second) == current_frames.end())
-        frame_it = deleteFrame(frame_it, true);
-      else
-        ++frame_it;
-    }
-  }
-
-  context_->queueRender();
 }
 
-static const Ogre::ColourValue ARROW_HEAD_COLOR(1.0f, 0.1f, 0.6f, 1.0f);
-static const Ogre::ColourValue ARROW_SHAFT_COLOR(0.8f, 0.8f, 0.3f, 1.0f);
-
-FrameInfo* HRITFDisplay::createFrame(const std::string& frame)
+hri_tools::FrameInfo * TFHRIDisplay::createFrame(const std::string & frame)
 {
-  FrameInfo* info = new FrameInfo(this);
+  auto info = new hri_tools::FrameInfo(this);
   frames_.insert(std::make_pair(frame, info));
 
   info->name_ = frame;
-  info->last_update_ = ros::Time::now();
-  info->axes_ = new Axes(scene_manager_, axes_node_, 0.2, 0.02);
+  info->last_update_ = tf2::get_now();
+  info->axes_ = new Axes(scene_manager_, axes_node_, 0.2f, 0.02f);
   info->axes_->getSceneNode()->setVisible(show_axes_property_->getBool());
-  info->selection_handler_.reset(new FrameSelectionHandler(info, context_));
+  info->selection_handler_ =
+    rviz_common::interaction::createSelectionHandler<hri_tools::FrameSelectionHandler>(
+    info, this,
+    context_);
   info->selection_handler_->addTrackedObjects(info->axes_->getSceneNode());
 
-  info->name_text_ = new MovableText(frame, "Liberation Sans", 0.1);
+  info->name_text_ = new MovableText(frame, "Liberation Sans", 0.1f);
   info->name_text_->setTextAlignment(MovableText::H_CENTER, MovableText::V_BELOW);
   info->name_node_ = names_node_->createChildSceneNode();
   info->name_node_->attachObject(info->name_text_);
   info->name_node_->setVisible(show_names_property_->getBool());
 
-  info->parent_arrow_ = new Arrow(scene_manager_, arrows_node_, 1.0f, 0.01, 1.0f, 0.08);
+  info->parent_arrow_ = new Arrow(scene_manager_, arrows_node_, 1.0f, 0.01f, 1.0f, 0.08f);
   info->parent_arrow_->getSceneNode()->setVisible(false);
-  info->parent_arrow_->setHeadColor(ARROW_HEAD_COLOR);
-  info->parent_arrow_->setShaftColor(ARROW_SHAFT_COLOR);
+  info->parent_arrow_->setHeadColor(hri_tools::FrameInfo::ARROW_HEAD_COLOR);
+  info->parent_arrow_->setShaftColor(hri_tools::FrameInfo::ARROW_SHAFT_COLOR);
 
-  info->enabled_property_ = new BoolProperty(QString::fromStdString(info->name_), true,
-                                             "Enable or disable this individual frame.",
-                                             frames_category_, SLOT(updateVisibilityFromFrame()), info);
+  info->enabled_property_ = new BoolProperty(
+    QString::fromStdString(info->name_),
+    true,
+    "Enable or disable this individual frame.",
+    frames_category_,
+    SLOT(updateVisibilityFromFrame()),
+    info);
 
-  info->parent_property_ =
-      new StringProperty("Parent", "", "Parent of this frame.  (Not editable)", info->enabled_property_);
+  info->parent_property_ = new StringProperty(
+    "Parent", "",
+    "Parent of this frame.  (Not editable)",
+    info->enabled_property_);
   info->parent_property_->setReadOnly(true);
 
-  info->position_property_ =
-      new VectorProperty("Position", Ogre::Vector3::ZERO,
-                         "Position of this frame, in the current Fixed Frame.  (Not editable)",
-                         info->enabled_property_);
+  info->position_property_ = new VectorProperty(
+    "Position", Ogre::Vector3::ZERO,
+    "Position of this frame, in the current Fixed Frame.  (Not editable)",
+    info->enabled_property_);
   info->position_property_->setReadOnly(true);
 
-  info->orientation_property_ =
-      new QuaternionProperty("Orientation", Ogre::Quaternion::IDENTITY,
-                             "Orientation of this frame, in the current Fixed Frame.  (Not editable)",
-                             info->enabled_property_);
+  info->orientation_property_ = new QuaternionProperty(
+    "Orientation", Ogre::Quaternion::IDENTITY,
+    "Orientation of this frame, in the current Fixed Frame.  (Not editable)",
+    info->enabled_property_);
   info->orientation_property_->setReadOnly(true);
 
-  info->rel_position_property_ =
-      new VectorProperty("Relative Position", Ogre::Vector3::ZERO,
-                         "Position of this frame, relative to it's parent frame.  (Not editable)",
-                         info->enabled_property_);
+  info->rel_position_property_ = new VectorProperty(
+    "Relative Position", Ogre::Vector3::ZERO,
+    "Position of this frame, relative to it's parent frame.  (Not editable)",
+    info->enabled_property_);
   info->rel_position_property_->setReadOnly(true);
 
-  info->rel_orientation_property_ =
-      new QuaternionProperty("Relative Orientation", Ogre::Quaternion::IDENTITY,
-                             "Orientation of this frame, relative to it's parent frame.  (Not editable)",
-                             info->enabled_property_);
+  info->rel_orientation_property_ = new QuaternionProperty(
+    "Relative Orientation",
+    Ogre::Quaternion::IDENTITY,
+    "Orientation of this frame, relative to it's parent frame.  (Not editable)",
+    info->enabled_property_);
   info->rel_orientation_property_->setReadOnly(true);
 
   // If the current frame was specified as disabled in the config file
   // then its enabled state must be updated accordingly
-  if (frame_config_enabled_state_.count(frame) > 0 && !frame_config_enabled_state_[frame])
-  {
+  if (frame_config_enabled_state_.count(frame) > 0 && !frame_config_enabled_state_[frame]) {
     info->enabled_property_->setBool(false);
   }
 
@@ -598,310 +514,191 @@ FrameInfo* HRITFDisplay::createFrame(const std::string& frame)
   return info;
 }
 
-Ogre::ColourValue lerpColor(const Ogre::ColourValue& start, const Ogre::ColourValue& end, float t)
+void TFHRIDisplay::updateFrame(hri_tools::FrameInfo * frame)
 {
-  return start * t + end * (1 - t);
+  auto tf_wrapper = std::dynamic_pointer_cast<transformation::TFWrapper>(
+    context_->getFrameManager()->getConnector().lock());
+
+  if (tf_wrapper) {
+    std::shared_ptr<tf2::BufferCore> tf_buffer = tf_wrapper->getBuffer();
+
+    // Check last received time so we can grey out/fade out frames that have stopped being published
+    tf2::TimePoint latest_time;
+
+    std::string stripped_fixed_frame = fixed_frame_.toStdString();
+    if (stripped_fixed_frame[0] == '/') {
+      stripped_fixed_frame = stripped_fixed_frame.substr(1);
+    }
+    try {
+      tf_buffer->_getLatestCommonTime(
+        tf_buffer->_validateFrameId("get_latest_common_time", stripped_fixed_frame),
+        tf_buffer->_validateFrameId("get_latest_common_time", frame->name_),
+        latest_time,
+        nullptr);
+    } catch (const tf2::LookupException & e) {
+      logTransformationException(stripped_fixed_frame, frame->name_, e.what());
+      return;
+    }
+
+    frame->setLastUpdate(latest_time);
+
+    double age = tf2::durationToSec(tf2::get_now() - frame->last_update_);
+    double frame_timeout = frame_timeout_property_->getFloat();
+    if (age > frame_timeout) {
+      frame->setVisible(false);
+      return;
+    }
+    frame->updateColorForAge(age, frame_timeout);
+
+    setStatusStd(StatusProperty::Ok, frame->name_, "Transform OK");
+
+    Ogre::Vector3 position(0, 0, 0);
+    Ogre::Quaternion orientation(1.0, 0.0, 0.0, 0.0);
+    if (!context_->getFrameManager()->getTransform(frame->name_, position, orientation)) {
+      rviz_common::UniformStringStream ss;
+      ss << "No transform from [" << frame->name_ << "] to [" << fixed_frame_.toStdString() << "]";
+      setStatusStd(StatusProperty::Warn, frame->name_, ss.str());
+      frame->setVisible(false);
+      return;
+    }
+
+    frame->updatePositionAndOrientation(position, orientation, scale_property_->getFloat());
+    frame->setNamesVisible(show_names_property_->getBool());
+    frame->setAxesVisible(show_axes_property_->getBool());
+
+    std::string old_parent = frame->parent_;
+    frame->parent_.clear();
+    bool has_parent = tf_buffer->_getParent(frame->name_, tf2::TimePointZero, frame->parent_);
+    if (has_parent) {
+      if (hasNoTreePropertyOrParentChanged(frame, old_parent)) {
+        updateParentTreeProperty(frame);
+      }
+
+      updateRelativePositionAndOrientation(frame, tf_buffer);
+
+      if (show_arrows_property_->getBool()) {
+        updateParentArrowIfTransformExists(frame, position);
+      } else {
+        frame->setParentArrowVisible(false);
+      }
+    } else {
+      if (hasNoTreePropertyOrParentChanged(frame, old_parent)) {
+        frame->updateTreeProperty(tree_category_);
+      }
+
+      frame->setParentArrowVisible(false);
+    }
+
+    frame->parent_property_->setStdString(frame->parent_);
+    frame->selection_handler_->setParentName(frame->parent_);
+  }
 }
 
-void HRITFDisplay::updateFrame(FrameInfo* frame)
+void TFHRIDisplay::updateParentTreeProperty(hri_tools::FrameInfo * frame) const
 {
-  auto tf = context_->getTF2BufferPtr();
-  tf2::CompactFrameID target_id = tf->_lookupFrameNumber(fixed_frame_.toStdString());
-  tf2::CompactFrameID source_id = tf->_lookupFrameNumber(frame->name_);
-
-  // Check last received time so we can grey out/fade out frames that have stopped being published
-  ros::Time latest_time;
-  tf->_getLatestCommonTime(target_id, source_id, latest_time, nullptr);
-
-  if ((latest_time != frame->last_time_to_fixed_) || (latest_time == ros::Time()))
-  {
-    frame->last_update_ = ros::Time::now();
-    frame->last_time_to_fixed_ = latest_time;
-  }
-
-  // Fade from color -> grey, then grey -> fully transparent
-  ros::Duration age = ros::Time::now() - frame->last_update_;
-  float frame_timeout = frame_timeout_property_->getFloat();
-  float one_third_timeout = frame_timeout * 0.3333333f;
-  if (age > ros::Duration(frame_timeout))
-  {
-    frame->parent_arrow_->getSceneNode()->setVisible(false);
-    frame->axes_->getSceneNode()->setVisible(false);
-    frame->name_node_->setVisible(false);
-    return;
-  }
-  else if (age > ros::Duration(one_third_timeout))
-  {
-    Ogre::ColourValue grey(0.7, 0.7, 0.7, 1.0);
-
-    if (age > ros::Duration(one_third_timeout * 2))
-    {
-      float a = std::max(0.0, (frame_timeout - age.toSec()) / one_third_timeout);
-      Ogre::ColourValue c = Ogre::ColourValue(grey.r, grey.g, grey.b, a);
-
-      frame->axes_->setXColor(c);
-      frame->axes_->setYColor(c);
-      frame->axes_->setZColor(c);
-      frame->name_text_->setColor(c);
-      frame->parent_arrow_->setColor(c.r, c.g, c.b, c.a);
-    }
-    else
-    {
-      float t = std::max(0.0, (one_third_timeout * 2 - age.toSec()) / one_third_timeout);
-      frame->axes_->setXColor(lerpColor(frame->axes_->getDefaultXColor(), grey, t));
-      frame->axes_->setYColor(lerpColor(frame->axes_->getDefaultYColor(), grey, t));
-      frame->axes_->setZColor(lerpColor(frame->axes_->getDefaultZColor(), grey, t));
-      frame->name_text_->setColor(lerpColor(Ogre::ColourValue::White, grey, t));
-      frame->parent_arrow_->setShaftColor(lerpColor(ARROW_SHAFT_COLOR, grey, t));
-      frame->parent_arrow_->setHeadColor(lerpColor(ARROW_HEAD_COLOR, grey, t));
-    }
-  }
-  else
-  {
-    frame->axes_->setToDefaultColors();
-    frame->name_text_->setColor(Ogre::ColourValue::White);
-    frame->parent_arrow_->setHeadColor(ARROW_HEAD_COLOR);
-    frame->parent_arrow_->setShaftColor(ARROW_SHAFT_COLOR);
-  }
-
-  setStatusStd(StatusProperty::Ok, frame->name_, "Transform OK");
-
-  Ogre::Vector3 position;
-  Ogre::Quaternion orientation;
-  if (!context_->getFrameManager()->getTransform(frame->name_, ros::Time(), position, orientation))
-  {
-    std::stringstream ss;
-    ss << "No transform from [" << frame->name_ << "] to frame [" << fixed_frame_.toStdString() << "]";
-    setStatusStd(StatusProperty::Warn, frame->name_, ss.str());
-    ROS_DEBUG("Error transforming frame '%s' to frame '%s'", frame->name_.c_str(),
-              qPrintable(fixed_frame_));
-    frame->name_node_->setVisible(false);
-    frame->axes_->getSceneNode()->setVisible(false);
-    frame->parent_arrow_->getSceneNode()->setVisible(false);
-    return;
-  }
-
-  frame->selection_handler_->setPosition(position);
-  frame->selection_handler_->setOrientation(orientation);
-
-  bool frame_enabled = frame->enabled_property_->getBool();
-
-  frame->axes_->setPosition(position);
-  frame->axes_->setOrientation(orientation);
-  frame->axes_->getSceneNode()->setVisible(show_axes_property_->getBool() && frame_enabled);
-  float scale = scale_property_->getFloat();
-  frame->axes_->setScale(Ogre::Vector3(scale, scale, scale));
-  float alpha = alpha_property_->getFloat();
-  frame->axes_->updateAlpha(alpha);
-
-  frame->name_node_->setPosition(position);
-  frame->name_node_->setVisible(show_names_property_->getBool() && frame_enabled);
-  frame->name_node_->setScale(scale, scale, scale);
-
-  frame->position_property_->setVector(position);
-  frame->orientation_property_->setQuaternion(orientation);
-
-  std::string old_parent = frame->parent_;
-  frame->parent_.clear();
-  bool has_parent = tf->_getParent(frame->name_, ros::Time(), frame->parent_);
-  if (has_parent)
-  {
-    geometry_msgs::TransformStamped transform;
-    try
-    {
-      transform = tf->lookupTransform(frame->parent_, frame->name_, ros::Time());
-    }
-    catch (tf2::TransformException& e)
-    {
-      ROS_DEBUG("Error transforming frame '%s' (parent of '%s') to frame '%s'", frame->parent_.c_str(),
-                frame->name_.c_str(), qPrintable(fixed_frame_));
-      transform.transform.rotation.w = 1.0;
-    }
-
-    // get the position/orientation relative to the parent frame
-    const auto& translation = transform.transform.translation;
-    const auto& quat = transform.transform.rotation;
-    Ogre::Vector3 relative_position(translation.x, translation.y, translation.z);
-    Ogre::Quaternion relative_orientation(quat.w, quat.x, quat.y, quat.z);
-    frame->rel_position_property_->setVector(relative_position);
-    frame->rel_orientation_property_->setQuaternion(relative_orientation);
-
-    if (show_arrows_property_->getBool())
-    {
-      Ogre::Vector3 parent_position;
-      Ogre::Quaternion parent_orientation;
-      if (!context_->getFrameManager()->getTransform(frame->parent_, ros::Time(), parent_position,
-                                                     parent_orientation))
-      {
-        ROS_DEBUG("Error transforming frame '%s' (parent of '%s') to frame '%s'", frame->parent_.c_str(),
-                  frame->name_.c_str(), qPrintable(fixed_frame_));
-      }
-
-      Ogre::Vector3 direction = parent_position - position;
-      float distance = direction.length();
-      direction.normalise();
-
-      Ogre::Quaternion orient = Ogre::Vector3::NEGATIVE_UNIT_Z.getRotationTo(direction);
-
-      frame->distance_to_parent_ = distance;
-      float head_length = (distance < 0.1 * scale) ? (0.1 * scale * distance) : 0.1 * scale;
-      float shaft_length = distance - head_length;
-      // aleeper: This was changed from 0.02 and 0.08 to 0.01 and 0.04 to match proper radius handling in
-      // arrow.cpp
-      frame->parent_arrow_->set(shaft_length, 0.01 * scale, head_length, 0.04 * scale);
-
-      if (distance > 0.001f)
-      {
-        frame->parent_arrow_->getSceneNode()->setVisible(show_arrows_property_->getBool() &&
-                                                         frame_enabled);
-      }
-      else
-      {
-        frame->parent_arrow_->getSceneNode()->setVisible(false);
-      }
-
-      frame->parent_arrow_->setPosition(position);
-      frame->parent_arrow_->setOrientation(orient);
-    }
-    else
-    {
-      frame->parent_arrow_->getSceneNode()->setVisible(false);
-    }
-  }
-  else
-  {
-    frame->parent_arrow_->getSceneNode()->setVisible(false);
-  }
-
-  // If this frame has no tree property or the parent has changed,
-  if (!frame->tree_property_ || old_parent != frame->parent_)
-  {
-    // Look up the new parent.
-    FrameInfo* parent = has_parent ? getFrameInfo(frame->parent_) : nullptr;
-    // Retrieve tree property to add the new child at
-    rviz::Property* parent_tree_property = has_parent ? nullptr : tree_category_;
-    if (parent && parent->tree_property_)
-      parent_tree_property = parent->tree_property_;
-    else if (has_parent) // otherwise reset parent_ to retry if the parent property was created
-      frame->parent_ = old_parent;
+  // Look up the new parent.
+  auto parent_it = frames_.find(frame->parent_);
+  if (parent_it != frames_.end()) {
+    hri_tools::FrameInfo * parent = parent_it->second;
 
     // If the parent has a tree property, make a new tree property for this frame.
-    if (!parent_tree_property)
-      ;                              // nothing more to do
-    else if (!frame->tree_property_) // create new property
-    {
-      frame->tree_property_ =
-          new Property(QString::fromStdString(frame->name_), QVariant(), "", parent_tree_property);
-    }
-    else // update property
-    {
-      // re-parent the tree property
-      frame->tree_property_->getParent()->takeChild(frame->tree_property_);
-      parent_tree_property->addChild(frame->tree_property_);
+    if (parent->tree_property_) {
+      frame->updateTreeProperty(parent->tree_property_);
     }
   }
-
-  frame->parent_property_->setStdString(frame->parent_);
-  frame->selection_handler_->setParentName(frame->parent_);
 }
 
-HRITFDisplay::M_FrameInfo::iterator HRITFDisplay::deleteFrame(M_FrameInfo::iterator it, bool delete_properties)
+/// If this frame has no tree property or the parent has changed,
+bool TFHRIDisplay::hasNoTreePropertyOrParentChanged(
+  const hri_tools::FrameInfo * frame,
+  const std::string & old_parent) const
 {
-  FrameInfo* frame = it->second;
-  it = frames_.erase(it);
+  return !frame->tree_property_ || old_parent != frame->parent_;
+}
+
+void TFHRIDisplay::logTransformationException(
+  const std::string & parent_frame,
+  const std::string & child_frame,
+  const std::string & message) const
+{
+  RVIZ_COMMON_LOG_DEBUG_STREAM(
+    "Error transforming from frame '" << parent_frame.c_str() <<
+      "' to frame '" << child_frame.c_str() <<
+      "' with fixed frame '" << qPrintable(fixed_frame_) << "': " << message);
+}
+
+/// set the position/orientation relative to the parent frame
+void TFHRIDisplay::updateRelativePositionAndOrientation(
+  const hri_tools::FrameInfo * frame,
+  std::shared_ptr<tf2::BufferCore> tf_buffer) const
+{
+  geometry_msgs::msg::TransformStamped transform;
+  transform.transform.translation = geometry_msgs::msg::Vector3();
+  transform.transform.rotation = geometry_msgs::msg::Quaternion();
+
+  try {
+    transform = tf_buffer->lookupTransform(frame->parent_, frame->name_, tf2::TimePointZero);
+  } catch (const tf2::LookupException & e) {
+    logTransformationException(frame->parent_, frame->name_, e.what());
+  } catch (const tf2::TransformException & e) {
+    logTransformationException(frame->parent_, frame->name_, e.what());
+  }
+
+  frame->rel_position_property_->setVector(
+    rviz_common::vector3MsgToOgre(transform.transform.translation));
+  frame->rel_orientation_property_->setQuaternion(
+    rviz_common::quaternionMsgToOgre(transform.transform.rotation));
+}
+
+void TFHRIDisplay::updateParentArrowIfTransformExists(
+  hri_tools::FrameInfo * frame,
+  const Ogre::Vector3 & position) const
+{
+  Ogre::Vector3 parent_position(0, 0, 0);
+  Ogre::Quaternion parent_orientation(1.0f, 0.0f, 0.0f, 0.0f);
+  if (!context_->getFrameManager()->getTransform(
+      frame->parent_, parent_position, parent_orientation))
+  {
+    logTransformationException(frame->parent_, frame->name_);
+  } else {
+    frame->setParentArrowVisible(show_arrows_property_->getBool());
+    frame->updateParentArrow(position, parent_position, scale_property_->getFloat());
+  }
+}
+
+
+void TFHRIDisplay::deleteFrame(hri_tools::FrameInfo * frame, bool delete_properties)
+{
+  auto it = frames_.find(frame->name_);
+  assert(it != frames_.end());
+
+  frames_.erase(it);
 
   delete frame->axes_;
-  context_->getSelectionManager()->removeObject(frame->axes_coll_);
+  context_->getHandlerManager()->removeHandler(frame->axes_coll_);
   delete frame->parent_arrow_;
   delete frame->name_text_;
   scene_manager_->destroySceneNode(frame->name_node_);
-  if (delete_properties)
-  {
+  if (delete_properties) {
     delete frame->enabled_property_;
     delete frame->tree_property_;
   }
   delete frame;
-  return it;
 }
 
-void HRITFDisplay::fixedFrameChanged()
+void TFHRIDisplay::fixedFrameChanged()
 {
   update_timer_ = update_rate_property_->getFloat();
 }
 
-void HRITFDisplay::reset()
+void TFHRIDisplay::reset()
 {
-  Display::reset();
+  rviz_common::Display::reset();
   clear();
 }
 
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-// FrameInfo
+}  // namespace displays
+}  // namespace rviz_default_plugins
 
-FrameInfo::FrameInfo(HRITFDisplay* display)
-  : display_(display)
-  , axes_(nullptr)
-  , axes_coll_(0)
-  , parent_arrow_(nullptr)
-  , name_text_(nullptr)
-  , distance_to_parent_(0.0f)
-  , arrow_orientation_(Ogre::Quaternion::IDENTITY)
-  , tree_property_(nullptr)
-{
-}
-
-void FrameInfo::updateVisibilityFromFrame()
-{
-  bool enabled = enabled_property_->getBool();
-  selection_handler_->setEnabled(enabled);
-  setEnabled(enabled);
-}
-
-void FrameInfo::updateVisibilityFromSelection()
-{
-  bool enabled = selection_handler_->getEnabled();
-  enabled_property_->setBool(enabled);
-  setEnabled(enabled);
-}
-
-void FrameInfo::setEnabled(bool enabled)
-{
-  if (name_node_)
-  {
-    name_node_->setVisible(display_->show_names_property_->getBool() && enabled);
-  }
-
-  if (axes_)
-  {
-    axes_->getSceneNode()->setVisible(display_->show_axes_property_->getBool() && enabled);
-  }
-
-  if (parent_arrow_)
-  {
-    if (distance_to_parent_ > 0.001f)
-    {
-      parent_arrow_->getSceneNode()->setVisible(display_->show_arrows_property_->getBool() && enabled);
-    }
-    else
-    {
-      parent_arrow_->getSceneNode()->setVisible(false);
-    }
-  }
-
-  if (display_->all_enabled_property_->getBool() && !enabled)
-  {
-    display_->changing_single_frame_enabled_state_ = true;
-    display_->all_enabled_property_->setBool(false);
-    display_->changing_single_frame_enabled_state_ = false;
-  }
-
-  // Update the configuration that stores the enabled state of all frames
-  display_->frame_config_enabled_state_[this->name_] = enabled;
-
-  display_->context_->queueRender();
-}
-
-} // namespace rviz
-
-#include <pluginlib/class_list_macros.hpp>
-PLUGINLIB_EXPORT_CLASS(rviz::HRITFDisplay, rviz::Display)
+#include <pluginlib/class_list_macros.hpp>  // NOLINT
+PLUGINLIB_EXPORT_CLASS(rviz_default_plugins::displays::TFHRIDisplay, rviz_common::Display)

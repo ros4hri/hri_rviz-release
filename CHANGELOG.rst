@@ -2,6 +2,23 @@
 Changelog for package hri_rviz
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+2.0.0 (2024-05-21)
+------------------
+* re-import CHANGELOG from ROS1
+* general cleanup
+  linting code + fixing wrong dependencies in package.xml
+* reading body description from the new dedicated topic
+* add LICENSE and CONTRIBUTING.md
+* using rviz-ogre-vendor instead of native ogre libraries
+  see https://github.com/ros2/rviz/issues/876
+* documentation
+* fixed icons
+* added copyright
+* TF (HRI) porting
+* Skeletons3D porting
+* Humans porting
+* Contributors: Séverin Lemaignan, lorenzoferrini
+
 0.4.2 (2023-10-18)
 ------------------
 * moving from non-normalized to normalized facial landmarks
@@ -86,3 +103,4 @@ Changelog for package hri_rviz
   the future, we will select a color from the HSB model, fixing
   S and B values to get sufficiently bright and vibrant colors.
 * Contributors: Séverin Lemaignan, Lorenzo Ferrini
+

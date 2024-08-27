@@ -1,5 +1,5 @@
-// Copyright 2021 PAL Robotics S.L.
 // Copyright 2012, Willow Garage, Inc.
+// Copyright 2024, PAL Robotics, S.L.
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are met:
@@ -31,37 +31,50 @@
 #define RVIZ_HRI_HUMANS_H
 
 #ifndef Q_MOC_RUN  // See: https://bugreports.qt-project.org/browse/QTBUG-22829
-#include <OGRE/OgreMaterial.h>
-#include <OGRE/OgreRenderTargetListener.h>
-#include <OGRE/OgreSharedPtr.h>
-#include <cv_bridge/cv_bridge.h>
-#include <hri_msgs/IdsList.h>
-#include <hri_msgs/NormalizedPointOfInterest2D.h>
-
-#include <QObject>
 #include <map>
 #include <string>
-#include <vector>
 
-#include "hri/hri.h"
-#include "ros/ros.h"
-#include "rviz/image/image_display_base.h"
-#include "rviz/image/ros_image_texture.h"
-#include "rviz/properties/bool_property.h"
-#include "rviz/properties/float_property.h"
-#include "rviz/properties/int_property.h"
-#include "rviz/render_panel.h"
+#include <QObject>
+
+#include <OgreMaterial.h>
+#include <OgreRenderTargetListener.h>
+#include <OgreSharedPtr.h>
+
+#include <cv_bridge/cv_bridge.h>
+
+#include <hri_msgs/msg/ids_list.hpp>
+#include <hri_msgs/msg/normalized_point_of_interest2_d.hpp>
+#include <hri/hri.hpp>
+
+#include <rviz_common/message_filter_display.hpp>
+#include <rviz_common/render_panel.hpp>
+#include <rviz_common/properties/bool_property.hpp>
+#include <rviz_common/properties/float_property.hpp>
+#include <rviz_common/properties/int_property.hpp>
+
+#include <rviz_default_plugins/displays/image/ros_image_texture_iface.hpp>
+#include <rviz_default_plugins/visibility_control.hpp>
+#include <rviz_default_plugins/displays/image/image_transport_display.hpp>
+
+#include <rclcpp/rclcpp.hpp>
 #endif
 
-namespace Ogre {
+namespace Ogre
+{
 class SceneNode;
 class Rectangle2D;
 }  // namespace Ogre
 
-namespace rviz {
-class HumansDisplay : public ImageDisplayBase {
+namespace rviz_hri_plugins
+{
+class HumansDisplay : public
+  rviz_default_plugins::displays::ImageTransportDisplay<sensor_msgs::msg::Image>
+{
   Q_OBJECT
- public:
+
+public:
+  explicit HumansDisplay(
+    std::unique_ptr<rviz_default_plugins::displays::ROSImageTextureIface> texture);
   HumansDisplay();
   ~HumansDisplay() override;
 
@@ -70,50 +83,59 @@ class HumansDisplay : public ImageDisplayBase {
   void update(float wall_dt, float ros_dt) override;
   void reset() override;
 
- public Q_SLOTS:
+public Q_SLOTS:
   virtual void updateNormalizeOptions();
   void updateShowFaces();
   void updateShowBodies();
   void updateShowFacialLandmarks();
-  void updateShowSkeletons();   
+  void updateShowSkeletons();
 
- protected:
+protected:
   // overrides from Display
   void onEnable() override;
   void onDisable() override;
 
   // skeleton drawing function
-  void drawSkeleton(std::string id, int width, int height, std::vector<hri_msgs::NormalizedPointOfInterest2D>& skeleton);
+  void drawSkeleton(
+    std::string id, int width, int height, std::map<hri::SkeletalKeypoint,
+    hri::PointOfInterest> & skeleton);
 
   /* This is called by incomingMessage(). */
-  void processMessage(const sensor_msgs::Image::ConstPtr& msg) override;
+  void processMessage(const sensor_msgs::msg::Image::ConstSharedPtr msg);
 
-  Ogre::SceneManager* img_scene_manager_;
+private:
+  void setupScreenRectangle();
+  void setupRenderPanel();
 
-  ROSImageTexture texture_;
+  void clear();
 
-  RenderPanel* render_panel_;
-
-  // ros::NodeHandle nh_;
-
- private:
-  Ogre::SceneNode* img_scene_node_;
-  Ogre::Rectangle2D* screen_rect_;
+  std::unique_ptr<Ogre::Rectangle2D> screen_rect_;
   Ogre::MaterialPtr material_;
 
-  BoolProperty* normalize_property_;
-  BoolProperty* show_faces_property_;
-  BoolProperty* show_facial_landmarks_property_;
-  BoolProperty* show_bodies_property_;
-  BoolProperty* show_skeletons_property_;
-  FloatProperty* min_property_;
-  FloatProperty* max_property_;
-  IntProperty* median_buffer_size_property_;
-  bool got_float_image_;
-  bool show_faces_, show_facial_landmarks_, show_bodies_, show_skeletons_;
+  std::unique_ptr<rviz_default_plugins::displays::ROSImageTextureIface> texture_;
 
-  hri::HRIListener hri_listener;
+  std::unique_ptr<rviz_common::RenderPanel> render_panel_;
+
+  rviz_common::properties::BoolProperty * normalize_property_;
+  rviz_common::properties::BoolProperty * show_faces_property_;
+  rviz_common::properties::BoolProperty * show_facial_landmarks_property_;
+  rviz_common::properties::BoolProperty * show_bodies_property_;
+  rviz_common::properties::BoolProperty * show_skeletons_property_;
+  rviz_common::properties::FloatProperty * min_property_;
+  rviz_common::properties::FloatProperty * max_property_;
+  rviz_common::properties::IntProperty * median_buffer_size_property_;
+
+  bool got_float_image_;
+  bool show_faces_;
+  bool show_facial_landmarks_;
+  bool show_bodies_;
+  bool show_skeletons_;
+
   cv_bridge::CvImagePtr cvBridge_;
+
+  rclcpp::Executor::SharedPtr hri_executor_;
+  rclcpp::Node::SharedPtr hri_node_;
+  std::shared_ptr<hri::HRIListener> hri_listener_;
 };
 
 }  // namespace rviz
